@@ -30,11 +30,28 @@ abstract class NuvexColors {
   static const Color borderLight = Color(0xFFF1F5F9);
   static const Color divider = Color(0xFFE2E8F0);
 
+  // Nuvex Brand & Login
+  static const Color brandBlue = Color(0xFF007AFF);
+  static const Color loginBackground = Color(0xFFEFF4F9);
+  static const Color inputBackground = Color(0xFFF4F6F9);
+
   // Status
   static const Color error = Color(0xFFDC2626);
   static const Color errorLight = Color(0xFFFEF2F2);
   static const Color success = Color(0xFF16A34A);
   static const Color successLight = Color(0xFFF0FDF4);
+
+  // Convenience aliases for screens
+  static const Color white = Color(0xFFFFFFFF);
+  static const Color darkNavy = Color(0xFF0F172A);
+  static const Color primaryBlue = Color(0xFF007AFF);
+  static const Color iceBackground = Color(0xFFEFF4F9);
+  static const Color errorRed = Color(0xFFDC2626);
+}
+
+/// Central typography token for Nuvex.
+abstract class NuvexTypography {
+  static const String primaryFamily = 'Inter';
 }
 
 /// Spacing and radius constants for consistent layout hierarchy.

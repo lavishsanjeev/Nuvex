@@ -5,7 +5,9 @@ import 'theme.dart';
 
 /// Root application widget for Nuvex.
 class NuvexApp extends StatelessWidget {
-  const NuvexApp({super.key});
+  final String initialRoute;
+
+  const NuvexApp({super.key, this.initialRoute = NuvexRoutes.initial});
 
   @override
   Widget build(BuildContext context) {
@@ -13,7 +15,7 @@ class NuvexApp extends StatelessWidget {
       title: 'Nuvex',
       theme: NuvexTheme.lightTheme,
       debugShowCheckedModeBanner: false,
-      initialRoute: NuvexRoutes.initial,
+      initialRoute: initialRoute,
       onGenerateRoute: NuvexRouter.onGenerateRoute,
     );
   }

@@ -1,84 +1,91 @@
 import 'package:flutter/material.dart';
 
+import '../features/account/account_screen.dart';
+import '../features/auth/authenticated_screen.dart';
+import '../features/auth/code_screen.dart';
+import '../features/auth/controllers/auth_controller.dart';
+import '../features/auth/login_page.dart';
+import '../features/auth/password_screen.dart';
+import '../features/auth/phone_screen.dart';
+import '../features/auth/startup_screen.dart';
+import '../features/auth/widgets/onboarding_screen.dart';
+import '../features/home/home_screen.dart';
+
 /// Central route names for Nuvex.
 abstract class NuvexRoutes {
   static const String initial = '/';
   static const String gettingStarted = '/getting-started';
   static const String credentials = '/credentials';
+  static const String phone = '/phone';
+  static const String code = '/code';
+  static const String password = '/password';
+  static const String authenticated = '/authenticated';
   static const String home = '/home';
+  static const String account = '/account';
 }
 
 /// Simple declarative navigation route generator.
 abstract class NuvexRouter {
   static Route<dynamic> onGenerateRoute(RouteSettings settings) {
     switch (settings.name) {
-      case NuvexRoutes.initial:
-      default:
+      case NuvexRoutes.account:
         return MaterialPageRoute(
           settings: settings,
-          builder: (_) => const _PlaceholderLandingPage(),
+          builder: (_) => const AccountScreen(),
+        );
+      case NuvexRoutes.gettingStarted:
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => const OnboardingScreen(),
+        );
+      case NuvexRoutes.credentials:
+        final controller = settings.arguments as AuthController?;
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => LoginPage(controller: controller),
+        );
+      case NuvexRoutes.phone:
+        final controller =
+            settings.arguments as AuthController? ?? AuthController();
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => PhoneScreen(controller: controller),
+        );
+      case NuvexRoutes.code:
+        final controller =
+            settings.arguments as AuthController? ?? AuthController();
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => CodeScreen(controller: controller),
+        );
+      case NuvexRoutes.password:
+        final controller =
+            settings.arguments as AuthController? ?? AuthController();
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => Password2FAScreen(controller: controller),
+        );
+      case NuvexRoutes.authenticated:
+        final controller =
+            settings.arguments as AuthController? ?? AuthController();
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => AuthenticatedScreen(controller: controller),
+        );
+      case NuvexRoutes.home:
+        final controller =
+            settings.arguments as AuthController? ?? AuthController();
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => HomeScreen(controller: controller),
+        );
+      case NuvexRoutes.initial:
+      default:
+        final controller = settings.arguments as AuthController?;
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => StartupScreen(controller: controller),
         );
     }
-  }
-}
-
-/// Baseline starter landing page for Phase 1.
-class _PlaceholderLandingPage extends StatelessWidget {
-  const _PlaceholderLandingPage();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Spacer(),
-              Container(
-                width: 56,
-                height: 56,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withAlpha(25),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Icon(
-                  Icons.cloud_outlined,
-                  size: 32,
-                  color: theme.colorScheme.primary,
-                ),
-              ),
-              const SizedBox(height: 24),
-              Text(
-                'Nuvex',
-                style: theme.textTheme.headlineLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: theme.colorScheme.onSurface,
-                  letterSpacing: -0.5,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Your files, your space.',
-                style: theme.textTheme.bodyLarge?.copyWith(
-                  color: theme.colorScheme.onSurface.withAlpha(160),
-                ),
-              ),
-              const Spacer(),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () {},
-                  child: const Text('Getting Started'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }

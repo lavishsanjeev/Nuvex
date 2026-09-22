@@ -35,9 +35,22 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
+  # Secure encrypted credential & session storage for Android KeyStore
+  flutter_secure_storage: ^11.1.0
+
+  # Telegram MTProto client and schema (100% pure Dart)
+  tg: ^0.0.20
+  t: ^229.0.0
+  sqflite: ^2.4.4
+  path: ^1.9.1
+  path_provider: ^2.1.5
+  video_player: ^2.9.2
+  crypto: ^3.0.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  sqflite_common_ffi: ^2.3.4
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
