@@ -9,6 +9,8 @@ import '../../../core/database/remote_file.dart';
 import '../../../core/utils/image_dimensions.dart';
 import '../../../telegram/telegram_media_service.dart';
 import '../../../telegram/telegram_models.dart';
+import '../models/collection_preview.dart';
+import '../services/collection_thumbnail_resolver.dart';
 
 /// Repository coordinating local SQLite database cache and Telegram MTProto media sync.
 ///
@@ -58,6 +60,55 @@ class MediaRepository {
       await _database.initialize();
     }
     return _database.getFilesByCategory(category, limit: limit, offset: offset);
+  }
+
+  /// Retrieves a single representative file for a collection category.
+  Future<RemoteFile?> getRepresentativeFile(String category) async {
+    if (!_database.isInitialized) {
+      return null;
+    }
+    return _database.getRepresentativeFile(category);
+  }
+
+  /// Retrieves representative files for the 4 primary collection categories.
+  Future<Map<String, RemoteFile?>> getCollectionRepresentatives() async {
+    if (!_database.isInitialized) {
+      return {};
+    }
+    final Map<String, RemoteFile?> result = {};
+    for (final category in ['documents', 'places', 'stickers', 'moments']) {
+      result[category] = await _database.getRepresentativeFile(category);
+    }
+    return result;
+  }
+
+  late final CollectionThumbnailResolver _thumbnailResolver =
+      CollectionThumbnailResolver(repository: this);
+
+  CollectionThumbnailResolver get thumbnailResolver => _thumbnailResolver;
+
+  /// Retrieves a prepared [CollectionPreview] for a specific category.
+  Future<CollectionPreview> getCollectionPreview(
+    String category, {
+    bool autoFetchThumb = true,
+  }) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    return _thumbnailResolver.resolveCollectionPreview(
+      category,
+      autoFetch: autoFetchThumb,
+    );
+  }
+
+  /// Retrieves all 4 primary [CollectionPreview]s.
+  Future<List<CollectionPreview>> getPrimaryCollectionPreviews({
+    bool autoFetchThumb = true,
+  }) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    return _thumbnailResolver.resolveAllPreviews(autoFetch: autoFetchThumb);
   }
 
   /// Retrieves real storage statistics aggregated directly from SQLite metadata.
@@ -145,14 +196,16 @@ class MediaRepository {
         await _database.upsertFiles(pageMedia);
       }
 
-      final oldestMsgId = _mediaService.lastOldestMessageId ??
+      final oldestMsgId =
+          _mediaService.lastOldestMessageId ??
           (pageMedia.isNotEmpty
               ? pageMedia
-                  .map((f) => f.telegramMessageId)
-                  .reduce((a, b) => a < b ? a : b)
+                    .map((f) => f.telegramMessageId)
+                    .reduce((a, b) => a < b ? a : b)
               : null);
 
-      final bool hasMore = (totalRawInPage >= effectivePageSize ||
+      final bool hasMore =
+          (totalRawInPage >= effectivePageSize ||
               pageMedia.length >= effectivePageSize) &&
           oldestMsgId != null &&
           oldestMsgId != currentOffsetId;
@@ -166,9 +219,7 @@ class MediaRepository {
         'hasMore=$hasMore',
       );
 
-      if (!hasMore ||
-          oldestMsgId == currentOffsetId ||
-          pageMedia.isEmpty) {
+      if (!hasMore || oldestMsgId == currentOffsetId || pageMedia.isEmpty) {
         debugPrint(
           '[SYNC_PAGINATION] Reached end of Telegram history on page $pageIndex',
         );
@@ -247,7 +298,9 @@ class MediaRepository {
   Future<RemoteFile> _executeThumbDownload(RemoteFile file) async {
     String basePath;
     try {
-      final dir = await getApplicationDocumentsDirectory();
+      final dir = await getApplicationDocumentsDirectory().timeout(
+        const Duration(milliseconds: 500),
+      );
       basePath = dir.path;
     } catch (_) {
       basePath = Directory.systemTemp.path;
@@ -383,10 +436,34 @@ class MediaRepository {
     } catch (_) {}
   }
 
-  /// Deletes media from Telegram, cleans up local app-private cache files,
-  /// and removes the record from the SQLite database.
+  /// Soft deletion: moves media to Trash without destroying Telegram file or local cache.
   Future<void> deleteMedia(RemoteFile file) async {
-    // 1. Delete from Telegram Cloud using existing authenticated MTProto connection
+    await moveToTrash(file);
+  }
+
+  /// Moves media to Trash by setting isTrashed = 1 and trashedAt in the SQLite database.
+  Future<void> moveToTrash(RemoteFile file, {int? trashedAtMs}) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    await _database.moveToTrash(
+      file.telegramMessageId,
+      trashedAtMs: trashedAtMs,
+    );
+  }
+
+  /// Restores a trashed media item back to normal active status.
+  Future<void> restoreFromTrash(RemoteFile file) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    await _database.restoreFromTrash(file.telegramMessageId);
+  }
+
+  /// Permanently deletes media from Telegram Cloud, cleans up local app-private cache,
+  /// and removes the record from SQLite only after Telegram deletion succeeds.
+  Future<void> permanentlyDeleteMedia(RemoteFile file) async {
+    // 1. Delete from Telegram Cloud using authenticated MTProto connection
     await _mediaService.deleteMessage(messageId: file.telegramMessageId);
 
     // 2. Clear local cached thumbnail and original (safeguarded: only within app-private cache)
@@ -397,6 +474,50 @@ class MediaRepository {
       await _database.initialize();
     }
     await _database.deleteFile(file.telegramMessageId);
+  }
+
+  /// Retrieves all currently trashed media records ordered by deletion date.
+  Future<List<RemoteFile>> getTrashedMedia({int? limit, int offset = 0}) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    return _database.getTrashedMedia(limit: limit, offset: offset);
+  }
+
+  /// Returns total count of items in Trash.
+  Future<int> getTrashedCount() async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    return _database.getTrashedCount();
+  }
+
+  /// Safely cleans up expired items from Trash (older than 30 days retention).
+  ///
+  /// Strictly complies with Requirement 4 & 6:
+  /// Never deletes local records without first deleting the Telegram media.
+  /// If Telegram deletion fails for an item, it remains in Trash.
+  Future<int> cleanupExpiredTrash({
+    Duration retention = const Duration(days: 30),
+  }) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    final expired = await _database.getExpiredTrashedFiles(
+      retention: retention,
+    );
+    int cleanedCount = 0;
+    for (final file in expired) {
+      try {
+        await permanentlyDeleteMedia(file);
+        cleanedCount++;
+      } catch (e) {
+        debugPrint(
+          '[TRASH] Background cleanup failed for ${file.telegramMessageId}: $e',
+        );
+      }
+    }
+    return cleanedCount;
   }
 
   /// Safely deletes local cached files strictly within Nuvex app-private cache directories.

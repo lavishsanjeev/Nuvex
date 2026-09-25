@@ -211,15 +211,21 @@ class _CollectionDetailScreenState extends State<CollectionDetailScreen> {
         itemCount: _items.length,
         itemBuilder: (context, index) {
           final file = _items[index];
+          final isTrash =
+              widget.categoryKey == 'recently_deleted' ||
+              widget.categoryKey == 'trash' ||
+              file.isTrashed;
           return MediaTile(
             file: file,
             controller: widget.mediaController,
+            badgeText: isTrash ? '${file.daysRemainingInTrash}d' : null,
             onTap: () {
               Navigator.of(context).push(
                 MediaViewerScreen.route(
                   files: _items,
                   initialIndex: index,
                   controller: _mediaController,
+                  isTrashMode: isTrash,
                 ),
               );
             },

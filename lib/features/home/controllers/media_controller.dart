@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../../core/database/remote_file.dart';
+import '../models/collection_preview.dart';
 import '../repositories/media_repository.dart';
+import '../services/collection_thumbnail_resolver.dart';
 
 /// Distinct statuses of media sync and database cache loading.
 enum MediaLoadingStatus {
@@ -43,9 +45,15 @@ class MediaController extends ChangeNotifier {
 
   MediaRepository get repository => _repository;
 
+  late final CollectionThumbnailResolver _thumbnailResolver =
+      CollectionThumbnailResolver(repository: _repository);
+  CollectionThumbnailResolver get thumbnailResolver => _thumbnailResolver;
+
   MediaLoadingStatus _status = MediaLoadingStatus.initial;
   List<RemoteFile> _recentMedia = [];
   Map<String, int> _collectionCounts = {};
+  Map<String, String?> _collectionThumbnails = {};
+  List<CollectionPreview> _collectionPreviews = [];
   String? _errorMessage;
   bool _isSyncing = false;
   DateTime? _lastSyncTime;
@@ -53,6 +61,8 @@ class MediaController extends ChangeNotifier {
   MediaLoadingStatus get status => _status;
   List<RemoteFile> get recentMedia => _recentMedia;
   Map<String, int> get collectionCounts => _collectionCounts;
+  Map<String, String?> get collectionThumbnails => _collectionThumbnails;
+  List<CollectionPreview> get collectionPreviews => _collectionPreviews;
   String? get errorMessage => _errorMessage;
   bool get isSyncing => _isSyncing;
   bool get isLoading => _status == MediaLoadingStatus.loading;
@@ -60,6 +70,36 @@ class MediaController extends ChangeNotifier {
   bool get hasError => _status == MediaLoadingStatus.error;
   bool get isEmpty =>
       _status == MediaLoadingStatus.loaded && _recentMedia.isEmpty;
+
+  /// Retrieves the prepared preview for a specific collection category.
+  CollectionPreview? getPreviewForCategory(String category) {
+    for (final p in _collectionPreviews) {
+      if (p.category == category) return p;
+    }
+    return null;
+  }
+
+  /// Resolves real thumbnail image paths and previews for primary collection cards.
+  Future<void> loadCollectionThumbnails({bool autoFetch = true}) async {
+    try {
+      if (!_repository.database.isInitialized) return;
+      final previews = await _repository.getPrimaryCollectionPreviews(
+        autoFetchThumb: autoFetch,
+      );
+      _collectionPreviews = previews;
+      final Map<String, String?> thumbs = {};
+      final Map<String, int> counts = Map.of(_collectionCounts);
+      for (final p in previews) {
+        thumbs[p.category] = p.thumbnailPath;
+        counts[p.category] = p.itemCount;
+      }
+      _collectionThumbnails = thumbs;
+      _collectionCounts = counts;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[MEDIA] Error loading collection thumbnails: $e');
+    }
+  }
 
   /// Loads cached data from SQLite database first, then triggers background sync.
   Future<void> initializeAndSync() async {
@@ -87,6 +127,18 @@ class MediaController extends ChangeNotifier {
 
       _recentMedia = cached;
       _collectionCounts = counts;
+
+      try {
+        final previews = await _repository.getPrimaryCollectionPreviews(
+          autoFetchThumb: false,
+        );
+        _collectionPreviews = previews;
+        final Map<String, String?> thumbs = {};
+        for (final p in previews) {
+          thumbs[p.category] = p.thumbnailPath;
+        }
+        _collectionThumbnails = thumbs;
+      } catch (_) {}
 
       debugPrint(
         '[CONTROLLER_DIAGNOSTIC] loadCacheOnly: loaded ${_recentMedia.length} items from SQLite cache',
@@ -127,6 +179,17 @@ class MediaController extends ChangeNotifier {
 
       _recentMedia = updatedMedia;
       _collectionCounts = counts;
+      try {
+        final previews = await _repository.getPrimaryCollectionPreviews(
+          autoFetchThumb: true,
+        );
+        _collectionPreviews = previews;
+        final Map<String, String?> thumbs = {};
+        for (final p in previews) {
+          thumbs[p.category] = p.thumbnailPath;
+        }
+        _collectionThumbnails = thumbs;
+      } catch (_) {}
       _status = MediaLoadingStatus.loaded;
       _lastSyncTime = DateTime.now();
       _errorMessage = null;
@@ -191,7 +254,6 @@ class MediaController extends ChangeNotifier {
       if (index != -1 &&
           _recentMedia[index].thumbnailPath != updated.thumbnailPath) {
         _recentMedia[index] = updated;
-        notifyListeners();
       }
       return updated;
     } catch (e) {
@@ -200,11 +262,9 @@ class MediaController extends ChangeNotifier {
     }
   }
 
-  /// Deletes a media item from Telegram, local cache, and SQLite database.
-  ///
-  /// Immediately updates [_recentMedia] and [_collectionCounts] and notifies listeners,
-  /// causing PhotosScreen and Collection screens to update in real time.
-  Future<void> deleteMedia(RemoteFile file) async {
+  /// Moves a media item to Trash, removing it from normal Photos and Collections immediately.
+  /// Complies with Trash architecture: Telegram file and local cache remain intact.
+  Future<void> moveToTrash(RemoteFile file, {int? trashedAtMs}) async {
     await _repository.deleteMedia(file);
 
     _recentMedia.removeWhere(
@@ -214,9 +274,79 @@ class MediaController extends ChangeNotifier {
     try {
       _collectionCounts = await _repository.getCachedCollectionCounts();
     } catch (e) {
-      debugPrint('[MEDIA] Error refreshing collection counts after delete: $e');
+      debugPrint('[MEDIA] Error refreshing collection counts after trash: $e');
     }
 
     notifyListeners();
+
+    final affectsCollectionThumb = _collectionPreviews.any(
+      (p) => p.thumbnailRemoteFile?.telegramMessageId == file.telegramMessageId,
+    );
+    if (affectsCollectionThumb) {
+      try {
+        await loadCollectionThumbnails(autoFetch: false);
+      } catch (_) {}
+    }
+  }
+
+  /// Alias for moveToTrash to preserve backward compatibility with existing callers.
+  Future<void> deleteMedia(RemoteFile file) async => moveToTrash(file);
+
+  /// Restores a trashed media item back to active Photos and Collections.
+  Future<void> restoreFromTrash(RemoteFile file) async {
+    await _repository.restoreFromTrash(file);
+
+    try {
+      _recentMedia = await _repository.getCachedRecentMedia(limit: null);
+      _collectionCounts = await _repository.getCachedCollectionCounts();
+    } catch (e) {
+      debugPrint('[MEDIA] Error refreshing media after restore: $e');
+    }
+
+    notifyListeners();
+
+    try {
+      await loadCollectionThumbnails(autoFetch: false);
+    } catch (_) {}
+  }
+
+  /// Permanently deletes media from Telegram, local cache, and SQLite database.
+  Future<void> permanentlyDeleteMedia(RemoteFile file) async {
+    await _repository.permanentlyDeleteMedia(file);
+
+    _recentMedia.removeWhere(
+      (f) => f.telegramMessageId == file.telegramMessageId,
+    );
+
+    try {
+      _collectionCounts = await _repository.getCachedCollectionCounts();
+    } catch (e) {
+      debugPrint(
+        '[MEDIA] Error refreshing collection counts after permanent delete: $e',
+      );
+    }
+
+    notifyListeners();
+
+    final affectsCollectionThumb = _collectionPreviews.any(
+      (p) => p.thumbnailRemoteFile?.telegramMessageId == file.telegramMessageId,
+    );
+    if (affectsCollectionThumb) {
+      try {
+        await loadCollectionThumbnails(autoFetch: false);
+      } catch (_) {}
+    }
+  }
+
+  /// Safely cleans up expired items from Trash in the background (older than 30 days retention).
+  Future<int> cleanupExpiredTrash() async {
+    final cleaned = await _repository.cleanupExpiredTrash();
+    if (cleaned > 0) {
+      try {
+        _collectionCounts = await _repository.getCachedCollectionCounts();
+        notifyListeners();
+      } catch (_) {}
+    }
+    return cleaned;
   }
 }

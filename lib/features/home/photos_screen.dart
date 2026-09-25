@@ -526,6 +526,8 @@ class _PhotosScreenState extends State<PhotosScreen> {
       child: GridView.builder(
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
+        addAutomaticKeepAlives: false,
+        addRepaintBoundaries: true,
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
           crossAxisCount: crossAxisCount,
           crossAxisSpacing: 2.5,
@@ -536,6 +538,7 @@ class _PhotosScreenState extends State<PhotosScreen> {
         itemBuilder: (context, index) {
           final item = media[index];
           return MediaTile(
+            key: ValueKey(item.telegramMessageId),
             file: item,
             controller: _mediaController,
             onTap: () {

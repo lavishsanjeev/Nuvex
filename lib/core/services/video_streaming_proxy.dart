@@ -131,7 +131,8 @@ class VideoStreamingProxy {
   /// Unregisters an active streaming session when the viewer moves away or disposes.
   void unregisterFile(int messageId) {
     _sessions.remove(messageId);
-    if (VideoPrefetchManager.instance.currentFile?.telegramMessageId == messageId) {
+    if (VideoPrefetchManager.instance.currentFile?.telegramMessageId ==
+        messageId) {
       VideoPrefetchManager.instance.stop();
     }
   }
@@ -366,9 +367,7 @@ class VideoStreamingProxy {
         contentLength.toString(),
       );
 
-      debugPrint(
-        '[PROXY] request range=$start-$end',
-      );
+      debugPrint('[PROXY] request range=$start-$end');
       debugPrint(
         '[STREAM_RANGE] Range: $rangeHeader -> bytes $start-$end/$totalSize (len: $contentLength)',
       );
@@ -562,10 +561,12 @@ class VideoStreamingProxy {
 
           response.add(slice);
           final proxySentTime = DateTime.now();
-          trace.timeFromChunkCompletionToProxyMs =
-              proxySentTime.difference(chunkCompletionTime).inMilliseconds;
-          trace.totalEndToEndLatencyMs =
-              proxySentTime.difference(trace.traceStartTime).inMilliseconds;
+          trace.timeFromChunkCompletionToProxyMs = proxySentTime
+              .difference(chunkCompletionTime)
+              .inMilliseconds;
+          trace.totalEndToEndLatencyMs = proxySentTime
+              .difference(trace.traceStartTime)
+              .inMilliseconds;
           trace.logSummary();
 
           if (!firstChunkLogged) {

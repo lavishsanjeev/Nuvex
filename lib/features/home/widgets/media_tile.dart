@@ -22,8 +22,15 @@ class MediaTile extends StatefulWidget {
   final RemoteFile file;
   final MediaController? controller;
   final VoidCallback? onTap;
+  final String? badgeText;
 
-  const MediaTile({super.key, required this.file, this.controller, this.onTap});
+  const MediaTile({
+    super.key,
+    required this.file,
+    this.controller,
+    this.onTap,
+    this.badgeText,
+  });
 
   @override
   State<MediaTile> createState() => _MediaTileState();
@@ -127,6 +134,8 @@ class _MediaTileState extends State<MediaTile> {
                 Image.file(
                   File(validImagePath),
                   fit: BoxFit.cover,
+                  cacheWidth: 300,
+                  cacheHeight: 300,
                   errorBuilder: (context, error, stackTrace) =>
                       _buildPlaceholder(isVideo),
                 )
@@ -173,6 +182,31 @@ class _MediaTileState extends State<MediaTile> {
                     ),
                   ),
                 ),
+              if (widget.badgeText != null)
+                Positioned(
+                  top: 4,
+                  right: 4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.65),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      widget.badgeText!,
+                      style: const TextStyle(
+                        fontFamily: NuvexTypography.primaryFamily,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -195,7 +229,14 @@ class _MediaTileState extends State<MediaTile> {
       return Stack(
         fit: StackFit.expand,
         children: [
-          Image.file(File(placeholderPath), fit: BoxFit.cover),
+          Image.file(
+            File(placeholderPath),
+            fit: BoxFit.cover,
+            cacheWidth: 300,
+            cacheHeight: 300,
+            errorBuilder: (context, error, stackTrace) =>
+                const SizedBox.shrink(),
+          ),
           Center(
             child: Container(
               padding: const EdgeInsets.all(6),

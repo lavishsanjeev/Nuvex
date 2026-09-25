@@ -28,7 +28,7 @@ class NuvexDatabase {
     return _db!;
   }
 
-  bool get isInitialized => _db != null;
+  bool get isInitialized => _db != null && _db!.isOpen;
 
   /// Initializes the local SQLite database.
   ///
@@ -39,6 +39,7 @@ class NuvexDatabase {
     if (overrideDb != null) {
       _db = overrideDb;
       await _createTables(_db!);
+      await _ensureMigrationColumns(_db!);
       return;
     }
 
@@ -48,9 +49,19 @@ class NuvexDatabase {
 
       _db = await openDatabase(
         path,
-        version: 1,
+        version: 2,
         onCreate: (db, version) async {
           await _createTables(db);
+          await _ensureMigrationColumns(db);
+        },
+        onUpgrade: (db, oldVersion, newVersion) async {
+          if (oldVersion < 2) {
+            await _ensureMigrationColumns(db);
+          }
+        },
+        onOpen: (db) async {
+          await _createTables(db);
+          await _ensureMigrationColumns(db);
         },
       );
       debugPrint('[DB] SQLite database initialized at $path');
@@ -83,7 +94,9 @@ class NuvexDatabase {
         durationMs INTEGER,
         width INTEGER,
         height INTEGER,
-        category TEXT NOT NULL
+        category TEXT NOT NULL,
+        isTrashed INTEGER NOT NULL DEFAULT 0,
+        trashedAt INTEGER
       )
     ''');
 
@@ -96,6 +109,46 @@ class NuvexDatabase {
       CREATE INDEX IF NOT EXISTS idx_remote_files_category 
       ON remote_files(category)
     ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_remote_files_name 
+      ON remote_files(name COLLATE NOCASE)
+    ''');
+
+    // Clean up legacy recent_searches table if present
+    await db.execute('DROP TABLE IF EXISTS recent_searches');
+
+    await _ensureMigrationColumns(db);
+  }
+
+  /// Ensures required migration columns (isTrashed, trashedAt) exist on remote_files.
+  Future<void> _ensureMigrationColumns(Database db) async {
+    try {
+      final tables = await db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='remote_files'",
+      );
+      if (tables.isEmpty) return;
+
+      final info = await db.rawQuery('PRAGMA table_info(remote_files)');
+      final columnNames = info.map((r) => r['name'] as String).toSet();
+
+      if (!columnNames.contains('isTrashed')) {
+        await db.execute(
+          'ALTER TABLE remote_files ADD COLUMN isTrashed INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+      if (!columnNames.contains('trashedAt')) {
+        await db.execute(
+          'ALTER TABLE remote_files ADD COLUMN trashedAt INTEGER',
+        );
+      }
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_remote_files_trashed 
+        ON remote_files(isTrashed, trashedAt)
+      ''');
+    } catch (e) {
+      debugPrint('[DB] Migration error checking columns: $e');
+    }
   }
 
   /// Inserts or updates remote file metadata.
@@ -110,8 +163,9 @@ class NuvexDatabase {
         INSERT INTO remote_files (
           id, telegramChatId, telegramMessageId, telegramFileId, name, mimeType,
           sizeBytes, createdAt, modifiedAt, thumbnailPath, localPath, remoteAvailable,
-          isFavorite, isArchived, isLocked, latitude, longitude, durationMs, width, height, category
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          isFavorite, isArchived, isLocked, latitude, longitude, durationMs, width, height, category,
+          isTrashed, trashedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(telegramMessageId) DO UPDATE SET
           name = excluded.name,
           mimeType = excluded.mimeType,
@@ -141,7 +195,9 @@ class NuvexDatabase {
           durationMs = COALESCE(excluded.durationMs, remote_files.durationMs),
           width = COALESCE(excluded.width, remote_files.width),
           height = COALESCE(excluded.height, remote_files.height),
-          category = excluded.category
+          category = excluded.category,
+          isTrashed = remote_files.isTrashed,
+          trashedAt = remote_files.trashedAt
         ''',
         [
           file.id,
@@ -165,6 +221,8 @@ class NuvexDatabase {
           file.width,
           file.height,
           file.category,
+          file.isTrashed ? 1 : 0,
+          file.trashedAt?.millisecondsSinceEpoch,
         ],
       );
     }
@@ -175,14 +233,11 @@ class NuvexDatabase {
   }
 
   /// Retrieves recent media (photos and videos) ordered by creation date descending.
-  Future<List<RemoteFile>> getRecentMedia({
-    int? limit,
-    int offset = 0,
-  }) async {
+  Future<List<RemoteFile>> getRecentMedia({int? limit, int offset = 0}) async {
     final database = db;
     final rows = await database.query(
       'remote_files',
-      where: 'category IN (?, ?, ?)',
+      where: 'category IN (?, ?, ?) AND isTrashed = 0',
       whereArgs: ['photos', 'videos', 'screenshots'],
       orderBy: 'createdAt DESC',
       limit: limit,
@@ -202,10 +257,24 @@ class NuvexDatabase {
     int limit = 50,
     int offset = 0,
   }) async {
+    if (!isInitialized) return [];
     final database = db;
+
+    if (category == 'trash' || category == 'recently_deleted') {
+      final rows = await database.query(
+        'remote_files',
+        where: 'isTrashed = 1',
+        orderBy: 'trashedAt DESC, createdAt DESC',
+        limit: limit,
+        offset: offset,
+      );
+      return rows.map((r) => RemoteFile.fromMap(r)).toList();
+    }
+
     if (category == 'largest_files') {
       final rows = await database.query(
         'remote_files',
+        where: 'isTrashed = 0',
         orderBy: 'sizeBytes DESC',
         limit: limit,
         offset: offset,
@@ -219,7 +288,7 @@ class NuvexDatabase {
           .millisecondsSinceEpoch;
       final rows = await database.query(
         'remote_files',
-        where: 'createdAt >= ?',
+        where: 'createdAt >= ? AND isTrashed = 0',
         whereArgs: [cutoff],
         orderBy: 'createdAt DESC',
         limit: limit,
@@ -231,7 +300,7 @@ class NuvexDatabase {
     if (category == 'archive') {
       final rows = await database.query(
         'remote_files',
-        where: 'isArchived = 1',
+        where: 'isArchived = 1 AND isTrashed = 0',
         orderBy: 'createdAt DESC',
         limit: limit,
         offset: offset,
@@ -242,7 +311,7 @@ class NuvexDatabase {
     if (category == 'locked') {
       final rows = await database.query(
         'remote_files',
-        where: 'isLocked = 1',
+        where: 'isLocked = 1 AND isTrashed = 0',
         orderBy: 'createdAt DESC',
         limit: limit,
         offset: offset,
@@ -253,7 +322,7 @@ class NuvexDatabase {
     if (category == 'favorites') {
       final rows = await database.query(
         'remote_files',
-        where: 'isFavorite = 1',
+        where: 'isFavorite = 1 AND isTrashed = 0',
         orderBy: 'createdAt DESC',
         limit: limit,
         offset: offset,
@@ -264,7 +333,8 @@ class NuvexDatabase {
     if (category == 'places') {
       final rows = await database.query(
         'remote_files',
-        where: 'latitude IS NOT NULL AND longitude IS NOT NULL',
+        where:
+            'latitude IS NOT NULL AND longitude IS NOT NULL AND isTrashed = 0',
         orderBy: 'createdAt DESC',
         limit: limit,
         offset: offset,
@@ -272,9 +342,23 @@ class NuvexDatabase {
       return rows.map((r) => RemoteFile.fromMap(r)).toList();
     }
 
+    if (category == 'moments') {
+      final explicit = await database.query(
+        'remote_files',
+        where: "category = 'moments' AND isTrashed = 0",
+        orderBy: 'createdAt DESC',
+        limit: limit,
+        offset: offset,
+      );
+      if (explicit.isNotEmpty) {
+        return explicit.map((r) => RemoteFile.fromMap(r)).toList();
+      }
+      return _getRecentMomentFiles(limit: limit, offset: offset);
+    }
+
     final rows = await database.query(
       'remote_files',
-      where: 'category = ?',
+      where: 'category = ? AND isTrashed = 0',
       whereArgs: [category],
       orderBy: 'createdAt DESC',
       limit: limit,
@@ -283,8 +367,140 @@ class NuvexDatabase {
     return rows.map((r) => RemoteFile.fromMap(r)).toList();
   }
 
+  /// Helper to query media files from the most recent meaningful date cluster.
+  Future<List<RemoteFile>> _getRecentMomentFiles({
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    if (!isInitialized) return [];
+    final database = db;
+
+    // Fetch the most recent media candidates
+    final rows = await database.query(
+      'remote_files',
+      where:
+          "category IN ('photos', 'videos', 'screenshots') AND isTrashed = 0",
+      orderBy: 'createdAt DESC',
+      limit: 200,
+    );
+    if (rows.isEmpty) return [];
+
+    // Group recent media by calendar day to find the most recent meaningful cluster (>= 2 items)
+    final grouped = <String, List<RemoteFile>>{};
+    for (final r in rows) {
+      final file = RemoteFile.fromMap(r);
+      final d = file.createdAt;
+      final key = '${d.year}-${d.month}-${d.day}';
+      grouped.putIfAbsent(key, () => []).add(file);
+    }
+
+    for (final entry in grouped.entries) {
+      if (entry.value.length >= 2) {
+        final cluster = entry.value;
+        if (offset >= cluster.length) return [];
+        return cluster.skip(offset).take(limit).toList();
+      }
+    }
+
+    // Insufficient data to form a moment cluster
+    return [];
+  }
+
+  /// Retrieves a single representative file for a collection category.
+  Future<RemoteFile?> getRepresentativeFile(String category) async {
+    if (!isInitialized) return null;
+    final database = db;
+
+    if (category == 'trash' || category == 'recently_deleted') {
+      final rowsWithThumb = await database.query(
+        'remote_files',
+        where: "isTrashed = 1 AND thumbnailPath IS NOT NULL AND thumbnailPath != ''",
+        orderBy: 'trashedAt DESC, createdAt DESC',
+        limit: 1,
+      );
+      if (rowsWithThumb.isNotEmpty) {
+        return RemoteFile.fromMap(rowsWithThumb.first);
+      }
+      final anyTrash = await database.query(
+        'remote_files',
+        where: 'isTrashed = 1',
+        orderBy: 'trashedAt DESC, createdAt DESC',
+        limit: 1,
+      );
+      return anyTrash.isNotEmpty ? RemoteFile.fromMap(anyTrash.first) : null;
+    }
+
+    if (category == 'documents') {
+      final rowsWithThumb = await database.query(
+        'remote_files',
+        where: "category = 'documents' AND isTrashed = 0 AND thumbnailPath IS NOT NULL AND thumbnailPath != ''",
+        orderBy: 'createdAt DESC',
+        limit: 1,
+      );
+      if (rowsWithThumb.isNotEmpty) {
+        return RemoteFile.fromMap(rowsWithThumb.first);
+      }
+    } else if (category == 'places') {
+      final rowsWithThumb = await database.query(
+        'remote_files',
+        where: "latitude IS NOT NULL AND longitude IS NOT NULL AND isTrashed = 0 AND thumbnailPath IS NOT NULL AND thumbnailPath != ''",
+        orderBy: 'createdAt DESC',
+        limit: 1,
+      );
+      if (rowsWithThumb.isNotEmpty) {
+        return RemoteFile.fromMap(rowsWithThumb.first);
+      }
+    } else if (category == 'stickers') {
+      final rowsWithThumb = await database.query(
+        'remote_files',
+        where: "category = 'stickers' AND isTrashed = 0 AND thumbnailPath IS NOT NULL AND thumbnailPath != ''",
+        orderBy: 'createdAt DESC',
+        limit: 1,
+      );
+      if (rowsWithThumb.isNotEmpty) {
+        return RemoteFile.fromMap(rowsWithThumb.first);
+      }
+    } else if (category == 'moments') {
+      // 1. Check for explicit moments category first (backward compatibility)
+      final explicitThumb = await database.query(
+        'remote_files',
+        where: "category = 'moments' AND isTrashed = 0 AND thumbnailPath IS NOT NULL AND thumbnailPath != ''",
+        orderBy: 'createdAt DESC',
+        limit: 1,
+      );
+      if (explicitThumb.isNotEmpty) {
+        return RemoteFile.fromMap(explicitThumb.first);
+      }
+      final explicitFiles = await database.query(
+        'remote_files',
+        where: "category = 'moments' AND isTrashed = 0",
+        orderBy: 'createdAt DESC',
+        limit: 1,
+      );
+      if (explicitFiles.isNotEmpty) {
+        return RemoteFile.fromMap(explicitFiles.first);
+      }
+
+      // 2. Derive from most recent meaningful date cluster of real media
+      final momentFiles = await _getRecentMomentFiles(limit: 50);
+      if (momentFiles.isNotEmpty) {
+        for (final f in momentFiles) {
+          if (f.thumbnailPath != null && f.thumbnailPath!.isNotEmpty) {
+            return f;
+          }
+        }
+        return momentFiles.first;
+      }
+      return null;
+    }
+
+    final files = await getFilesByCategory(category, limit: 1);
+    return files.firstOrNull;
+  }
+
   /// Computes real collection counts derived directly from database metadata.
   Future<Map<String, int>> getCollectionCounts() async {
+    if (!isInitialized) return {};
     final database = db;
     final Map<String, int> counts = {
       'documents': 0,
@@ -297,11 +513,14 @@ class NuvexDatabase {
       'creations': 0,
       'archive': 0,
       'locked': 0,
+      'recently_deleted': 0,
+      'trash': 0,
     };
 
     final rows = await database.rawQuery('''
       SELECT category, COUNT(*) as count 
       FROM remote_files 
+      WHERE isTrashed = 0
       GROUP BY category
     ''');
 
@@ -315,16 +534,29 @@ class NuvexDatabase {
 
     // Places count
     final placesRes = await database.rawQuery(
-      'SELECT COUNT(*) as count FROM remote_files WHERE latitude IS NOT NULL AND longitude IS NOT NULL',
+      'SELECT COUNT(*) as count FROM remote_files WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND isTrashed = 0',
     );
     counts['places'] = (placesRes.firstOrNull?['count'] as num?)?.toInt() ?? 0;
+
+    // Moments count: explicit category or files in the current moment cluster
+    final explicitMoments = await database.rawQuery(
+      "SELECT COUNT(*) as count FROM remote_files WHERE category = 'moments' AND isTrashed = 0",
+    );
+    final expCount =
+        (explicitMoments.firstOrNull?['count'] as num?)?.toInt() ?? 0;
+    if (expCount > 0) {
+      counts['moments'] = expCount;
+    } else {
+      final momentFiles = await _getRecentMomentFiles(limit: 100);
+      counts['moments'] = momentFiles.length;
+    }
 
     // Recently added count (past 7 days)
     final cutoff = DateTime.now()
         .subtract(const Duration(days: 7))
         .millisecondsSinceEpoch;
     final recentRes = await database.rawQuery(
-      'SELECT COUNT(*) as count FROM remote_files WHERE createdAt >= ?',
+      'SELECT COUNT(*) as count FROM remote_files WHERE createdAt >= ? AND isTrashed = 0',
       [cutoff],
     );
     counts['recently_added'] =
@@ -332,22 +564,30 @@ class NuvexDatabase {
 
     // Archive count
     final archiveRes = await database.rawQuery(
-      'SELECT COUNT(*) as count FROM remote_files WHERE isArchived = 1',
+      'SELECT COUNT(*) as count FROM remote_files WHERE isArchived = 1 AND isTrashed = 0',
     );
     counts['archive'] =
         (archiveRes.firstOrNull?['count'] as num?)?.toInt() ?? 0;
 
     // Locked count
     final lockedRes = await database.rawQuery(
-      'SELECT COUNT(*) as count FROM remote_files WHERE isLocked = 1',
+      'SELECT COUNT(*) as count FROM remote_files WHERE isLocked = 1 AND isTrashed = 0',
     );
     counts['locked'] = (lockedRes.firstOrNull?['count'] as num?)?.toInt() ?? 0;
 
     // Favorites count
     final favRes = await database.rawQuery(
-      'SELECT COUNT(*) as count FROM remote_files WHERE isFavorite = 1',
+      'SELECT COUNT(*) as count FROM remote_files WHERE isFavorite = 1 AND isTrashed = 0',
     );
     counts['favorites'] = (favRes.firstOrNull?['count'] as num?)?.toInt() ?? 0;
+
+    // Recently deleted / Trash count
+    final trashRes = await database.rawQuery(
+      'SELECT COUNT(*) as count FROM remote_files WHERE isTrashed = 1',
+    );
+    final trashCount = (trashRes.firstOrNull?['count'] as num?)?.toInt() ?? 0;
+    counts['recently_deleted'] = trashCount;
+    counts['trash'] = trashCount;
 
     return counts;
   }
@@ -360,6 +600,65 @@ class NuvexDatabase {
     );
     final maxId = rows.firstOrNull?['maxId'] as int?;
     return maxId;
+  }
+
+  /// Moves a media record to Trash by setting isTrashed = 1 and trashedAt = timestamp.
+  Future<void> moveToTrash(int telegramMessageId, {int? trashedAtMs}) async {
+    final database = db;
+    final now = trashedAtMs ?? DateTime.now().millisecondsSinceEpoch;
+    await database.update(
+      'remote_files',
+      {'isTrashed': 1, 'trashedAt': now},
+      where: 'telegramMessageId = ?',
+      whereArgs: [telegramMessageId],
+    );
+  }
+
+  /// Restores a trashed media record back to active status (isTrashed = 0, trashedAt = NULL).
+  Future<void> restoreFromTrash(int telegramMessageId) async {
+    final database = db;
+    await database.update(
+      'remote_files',
+      {'isTrashed': 0, 'trashedAt': null},
+      where: 'telegramMessageId = ?',
+      whereArgs: [telegramMessageId],
+    );
+  }
+
+  /// Retrieves trashed media records ordered by deletion timestamp descending.
+  Future<List<RemoteFile>> getTrashedMedia({int? limit, int offset = 0}) async {
+    final database = db;
+    final rows = await database.query(
+      'remote_files',
+      where: 'isTrashed = 1',
+      orderBy: 'trashedAt DESC, createdAt DESC',
+      limit: limit,
+      offset: offset,
+    );
+    return rows.map((r) => RemoteFile.fromMap(r)).toList();
+  }
+
+  /// Returns total count of items currently in Trash.
+  Future<int> getTrashedCount() async {
+    final database = db;
+    final res = await database.rawQuery(
+      'SELECT COUNT(*) as count FROM remote_files WHERE isTrashed = 1',
+    );
+    return (res.firstOrNull?['count'] as num?)?.toInt() ?? 0;
+  }
+
+  /// Retrieves trashed files that have exceeded the retention duration (default 30 days).
+  Future<List<RemoteFile>> getExpiredTrashedFiles({
+    Duration retention = const Duration(days: 30),
+  }) async {
+    final database = db;
+    final cutoff = DateTime.now().subtract(retention).millisecondsSinceEpoch;
+    final rows = await database.query(
+      'remote_files',
+      where: 'isTrashed = 1 AND trashedAt IS NOT NULL AND trashedAt <= ?',
+      whereArgs: [cutoff],
+    );
+    return rows.map((r) => RemoteFile.fromMap(r)).toList();
   }
 
   /// Deletes a file record by Telegram message ID.
@@ -378,6 +677,7 @@ class NuvexDatabase {
     final rows = await database.rawQuery('''
       SELECT category, COUNT(*) as file_count, SUM(sizeBytes) as total_bytes
       FROM remote_files
+      WHERE isTrashed = 0
       GROUP BY category
     ''');
 

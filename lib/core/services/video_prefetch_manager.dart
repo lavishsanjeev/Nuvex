@@ -59,9 +59,8 @@ class VideoPrefetchManager {
   DateTime? _lastPlayerLogTime;
   bool _refillInProgress = false;
 
-  VideoPrefetchManager({
-    VideoRangeCacheManager? cacheManager,
-  }) : _cacheManager = cacheManager ?? VideoRangeCacheManager.instance;
+  VideoPrefetchManager({VideoRangeCacheManager? cacheManager})
+    : _cacheManager = cacheManager ?? VideoRangeCacheManager.instance;
 
   static final VideoPrefetchManager instance = VideoPrefetchManager();
 
@@ -75,6 +74,8 @@ class VideoPrefetchManager {
   bool get isRunning => _isRunning;
   bool get isPlaying => _isPlaying;
   bool get isBuffering => _isBuffering;
+  Duration get playerPosition => _playerPosition;
+  Duration get playerDuration => _playerDuration;
 
   /// Starts a prefetch session for [file] using [mediaService].
   void start({
@@ -243,7 +244,8 @@ class VideoPrefetchManager {
       final targetEndChunk = (desiredEndByte - 1) ~/ chunkSize;
 
       for (int c = startChunk; c <= targetEndChunk && c < totalChunks; c++) {
-        if (!_isRunning || _currentFile?.telegramMessageId != file.telegramMessageId) {
+        if (!_isRunning ||
+            _currentFile?.telegramMessageId != file.telegramMessageId) {
           break;
         }
 

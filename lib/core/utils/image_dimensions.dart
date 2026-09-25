@@ -75,21 +75,41 @@ import 'dart:typed_data';
   return null;
 }
 
+/// In-memory cache for validated HQ thumbnail file paths.
+/// Avoids repeated synchronous disk I/O and JPEG header parsing on every build frame.
+final Map<String, bool> _hqThumbnailValidationCache = <String, bool>{};
+
 /// Validates whether a cached thumbnail file is a genuine high-quality thumbnail.
 ///
 /// Ensures:
 /// 1. File exists and is > 1500 bytes (stripped thumbnails are ~700 bytes).
 /// 2. Header decodes to actual dimensions with width >= 120 and height >= 120
 ///    (stripped thumbnails are 40x40; real Telegram 'm' thumbnails are ~320x320).
+/// Caches positive validations in memory to eliminate repeated disk I/O.
 bool isValidHqThumbnail(File file) {
+  final path = file.path;
+  final cached = _hqThumbnailValidationCache[path];
+  if (cached != null) return cached;
+
   try {
     if (!file.existsSync() || file.lengthSync() < 1500) {
+      _hqThumbnailValidationCache[path] = false;
       return false;
     }
-    final bytes = file.readAsBytesSync();
+    // Only read up to 4096 bytes to inspect JPEG SOF headers rather than loading entire file
+    final raf = file.openSync(mode: FileMode.read);
+    final Uint8List bytes;
+    try {
+      bytes = raf.readSync(4096);
+    } finally {
+      raf.closeSync();
+    }
     final dims = getJpegDimensions(bytes);
-    if (dims == null) return false;
-    return dims.width >= 120 && dims.height >= 120;
+    final isValid = dims != null && dims.width >= 120 && dims.height >= 120;
+    if (isValid) {
+      _hqThumbnailValidationCache[path] = true;
+    }
+    return isValid;
   } catch (_) {
     return false;
   }

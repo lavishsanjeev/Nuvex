@@ -206,7 +206,13 @@ class TelegramMediaService {
     required int offset,
     required int limit,
     Duration timeout = const Duration(seconds: 30),
-    void Function(DateTime start, DateTime end, int elapsedMs, int activeAtStart)? onMetrics,
+    void Function(
+      DateTime start,
+      DateTime end,
+      int elapsedMs,
+      int activeAtStart,
+    )?
+    onMetrics,
   }) async {
     if (offset < 0) {
       throw ArgumentError('Offset must be non-negative: $offset');
@@ -257,7 +263,13 @@ class TelegramMediaService {
     required int offset,
     required int limit,
     Duration timeout = const Duration(seconds: 30),
-    void Function(DateTime start, DateTime end, int elapsedMs, int activeAtStart)? onMetrics,
+    void Function(
+      DateTime start,
+      DateTime end,
+      int elapsedMs,
+      int activeAtStart,
+    )?
+    onMetrics,
   }) async {
     final ready = await _authService.ensureConnected();
     if (!ready || _authService.client == null) {
@@ -304,7 +316,13 @@ class TelegramMediaService {
     required int offset,
     required int limit,
     required Duration timeout,
-    void Function(DateTime start, DateTime end, int elapsedMs, int activeAtStart)? onMetrics,
+    void Function(
+      DateTime start,
+      DateTime end,
+      int elapsedMs,
+      int activeAtStart,
+    )?
+    onMetrics,
   }) async {
     _activeTelegramRequests++;
     final activeAtStart = _activeTelegramRequests;
