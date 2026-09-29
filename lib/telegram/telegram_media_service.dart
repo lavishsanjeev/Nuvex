@@ -1046,15 +1046,17 @@ class TelegramMediaService {
           }
         } else if (sz is t.PhotoStrippedSize && thumbsDir != null) {
           try {
-            final jpeg = inflateTelegramStrippedThumbnail(sz.bytes);
-            if (jpeg != null) {
-              final placeholderFile = File(
-                '$thumbsDir/${messageId}_placeholder.jpg',
-              );
-              if (!placeholderFile.parent.existsSync()) {
-                placeholderFile.parent.createSync(recursive: true);
+            final placeholderFile = File(
+              '$thumbsDir/${messageId}_placeholder.jpg',
+            );
+            if (!placeholderFile.existsSync()) {
+              final jpeg = inflateTelegramStrippedThumbnail(sz.bytes);
+              if (jpeg != null) {
+                if (!placeholderFile.parent.existsSync()) {
+                  placeholderFile.parent.createSync(recursive: true);
+                }
+                placeholderFile.writeAsBytesSync(jpeg);
               }
-              placeholderFile.writeAsBytesSync(jpeg, flush: true);
             }
           } catch (_) {}
         } else if (sz is t.PhotoCachedSize &&
@@ -1062,10 +1064,12 @@ class TelegramMediaService {
             sz.w >= 120) {
           try {
             final thumbFile = File('$thumbsDir/${messageId}_hq.jpg');
-            if (!thumbFile.parent.existsSync()) {
-              thumbFile.parent.createSync(recursive: true);
+            if (!thumbFile.existsSync()) {
+              if (!thumbFile.parent.existsSync()) {
+                thumbFile.parent.createSync(recursive: true);
+              }
+              thumbFile.writeAsBytesSync(sz.bytes);
             }
-            thumbFile.writeAsBytesSync(sz.bytes, flush: true);
             thumbnailPath = thumbFile.path;
           } catch (_) {}
         }
@@ -1164,24 +1168,28 @@ class TelegramMediaService {
         for (final th in doc.thumbs!) {
           if (th is t.PhotoStrippedSize) {
             try {
-              final jpeg = inflateTelegramStrippedThumbnail(th.bytes);
-              if (jpeg != null) {
-                final placeholderFile = File(
-                  '$thumbsDir/${messageId}_placeholder.jpg',
-                );
-                if (!placeholderFile.parent.existsSync()) {
-                  placeholderFile.parent.createSync(recursive: true);
+              final placeholderFile = File(
+                '$thumbsDir/${messageId}_placeholder.jpg',
+              );
+              if (!placeholderFile.existsSync()) {
+                final jpeg = inflateTelegramStrippedThumbnail(th.bytes);
+                if (jpeg != null) {
+                  if (!placeholderFile.parent.existsSync()) {
+                    placeholderFile.parent.createSync(recursive: true);
+                  }
+                  placeholderFile.writeAsBytesSync(jpeg);
                 }
-                placeholderFile.writeAsBytesSync(jpeg, flush: true);
               }
             } catch (_) {}
           } else if (th is t.PhotoCachedSize && th.w >= 120) {
             try {
               final thumbFile = File('$thumbsDir/${messageId}_hq.jpg');
-              if (!thumbFile.parent.existsSync()) {
-                thumbFile.parent.createSync(recursive: true);
+              if (!thumbFile.existsSync()) {
+                if (!thumbFile.parent.existsSync()) {
+                  thumbFile.parent.createSync(recursive: true);
+                }
+                thumbFile.writeAsBytesSync(th.bytes);
               }
-              thumbFile.writeAsBytesSync(th.bytes, flush: true);
               thumbnailPath = thumbFile.path;
               break;
             } catch (_) {}

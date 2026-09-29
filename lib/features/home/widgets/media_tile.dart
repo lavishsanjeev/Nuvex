@@ -22,14 +22,20 @@ class MediaTile extends StatefulWidget {
   final RemoteFile file;
   final MediaController? controller;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
   final String? badgeText;
+  final bool isSelected;
+  final bool isSelectionMode;
 
   const MediaTile({
     super.key,
     required this.file,
     this.controller,
     this.onTap,
+    this.onLongPress,
     this.badgeText,
+    this.isSelected = false,
+    this.isSelectionMode = false,
   });
 
   @override
@@ -39,11 +45,13 @@ class MediaTile extends StatefulWidget {
 class _MediaTileState extends State<MediaTile> {
   late RemoteFile _currentFile;
   bool _requestedThumb = false;
+  String? _validImagePath;
 
   @override
   void initState() {
     super.initState();
     _currentFile = widget.file;
+    _updateValidImagePath();
     _checkAndRequestThumb();
   }
 
@@ -55,23 +63,29 @@ class _MediaTileState extends State<MediaTile> {
         widget.file.localPath != oldWidget.file.localPath) {
       _currentFile = widget.file;
       _requestedThumb = false;
+      _updateValidImagePath();
       _checkAndRequestThumb();
     }
+  }
+
+  void _updateValidImagePath() {
+    String? path;
+    if (_currentFile.thumbnailPath != null &&
+        isValidHqThumbnail(File(_currentFile.thumbnailPath!))) {
+      path = _currentFile.thumbnailPath;
+    } else if (!_currentFile.isVideo &&
+        _currentFile.localPath != null &&
+        File(_currentFile.localPath!).existsSync() &&
+        File(_currentFile.localPath!).lengthSync() > 0) {
+      path = _currentFile.localPath;
+    }
+    _validImagePath = path;
   }
 
   void _checkAndRequestThumb() {
     if (_requestedThumb) return;
 
-    final hasThumb =
-        _currentFile.thumbnailPath != null &&
-        isValidHqThumbnail(File(_currentFile.thumbnailPath!));
-
-    final hasLocal =
-        _currentFile.localPath != null &&
-        File(_currentFile.localPath!).existsSync() &&
-        File(_currentFile.localPath!).lengthSync() > 0;
-
-    if (!hasThumb && !hasLocal && widget.controller != null) {
+    if (_validImagePath == null && widget.controller != null) {
       _requestedThumb = true;
       widget.controller!
           .loadThumbnail(_currentFile)
@@ -80,6 +94,7 @@ class _MediaTileState extends State<MediaTile> {
                 updated.thumbnailPath != _currentFile.thumbnailPath) {
               setState(() {
                 _currentFile = updated;
+                _updateValidImagePath();
               });
             }
           })
@@ -90,6 +105,10 @@ class _MediaTileState extends State<MediaTile> {
   void _handleTap() {
     if (widget.onTap != null) {
       widget.onTap!();
+      return;
+    }
+    if (widget.isSelectionMode && widget.controller != null) {
+      widget.controller!.toggleSelection(_currentFile);
       return;
     }
     if (widget.controller != null) {
@@ -103,21 +122,19 @@ class _MediaTileState extends State<MediaTile> {
     }
   }
 
+  void _handleLongPress() {
+    if (widget.onLongPress != null) {
+      widget.onLongPress!();
+    } else if (widget.controller != null) {
+      widget.controller!.enterSelectionMode(_currentFile);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    // Determine image file path: prefer high-quality thumbnail for the 4-column gallery grid
-    // to keep memory light and scrolling smooth. Original full-res files are reserved for MediaViewerScreen.
-    String? validImagePath;
-    if (_currentFile.thumbnailPath != null &&
-        isValidHqThumbnail(File(_currentFile.thumbnailPath!))) {
-      validImagePath = _currentFile.thumbnailPath;
-    } else if (!_currentFile.isVideo &&
-        _currentFile.localPath != null &&
-        File(_currentFile.localPath!).existsSync() &&
-        File(_currentFile.localPath!).lengthSync() > 0) {
-      validImagePath = _currentFile.localPath;
-    }
-
+    // Uses pre-computed _validImagePath resolved in lifecycle hooks.
+    // Zero synchronous disk I/O or JPEG header parsing runs inside build().
+    final validImagePath = _validImagePath;
     final isVideo = _currentFile.isVideo;
 
     return AspectRatio(
@@ -126,6 +143,7 @@ class _MediaTileState extends State<MediaTile> {
         color: const Color(0xFFF1F5F9), // Neutral minimal placeholder color
         child: InkWell(
           onTap: _handleTap,
+          onLongPress: _handleLongPress,
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -141,6 +159,21 @@ class _MediaTileState extends State<MediaTile> {
                 )
               else
                 _buildPlaceholder(isVideo),
+
+              // Selected tint and border overlay
+              if (widget.isSelectionMode && widget.isSelected) ...[
+                Container(
+                  color: NuvexColors.primaryBlue.withValues(alpha: 0.28),
+                ),
+                Container(
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: NuvexColors.primaryBlue,
+                      width: 3.0,
+                    ),
+                  ),
+                ),
+              ],
 
               // Video Duration and Play Icon Overlay
               if (isVideo)
@@ -182,7 +215,45 @@ class _MediaTileState extends State<MediaTile> {
                     ),
                   ),
                 ),
-              if (widget.badgeText != null)
+
+              // Selection mode checkmark / hollow indicator
+              if (widget.isSelectionMode)
+                Positioned(
+                  top: 5,
+                  right: 5,
+                  child: widget.isSelected
+                      ? Container(
+                          width: 22,
+                          height: 22,
+                          decoration: const BoxDecoration(
+                            color: NuvexColors.primaryBlue,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Color(0x33000000),
+                                blurRadius: 4,
+                                offset: Offset(0, 1),
+                              ),
+                            ],
+                          ),
+                          child: const Icon(
+                            Icons.check_rounded,
+                            size: 15,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Container(
+                          width: 22,
+                          height: 22,
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.35),
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 1.5),
+                          ),
+                        ),
+                ),
+
+              if (widget.badgeText != null && !widget.isSelectionMode)
                 Positioned(
                   top: 4,
                   right: 4,

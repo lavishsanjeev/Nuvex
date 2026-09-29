@@ -29,6 +29,7 @@ class RemoteFile {
   category; // 'photos', 'videos', 'documents', 'screenshots', 'stickers', etc.
   final bool isTrashed;
   final DateTime? trashedAt;
+  final String? sha256;
 
   const RemoteFile({
     required this.id,
@@ -54,6 +55,7 @@ class RemoteFile {
     required this.category,
     this.isTrashed = false,
     this.trashedAt,
+    this.sha256,
   });
 
   RemoteFile copyWith({
@@ -80,6 +82,7 @@ class RemoteFile {
     String? category,
     bool? isTrashed,
     DateTime? trashedAt,
+    String? sha256,
   }) {
     return RemoteFile(
       id: id ?? this.id,
@@ -105,6 +108,7 @@ class RemoteFile {
       category: category ?? this.category,
       isTrashed: isTrashed ?? this.isTrashed,
       trashedAt: trashedAt ?? this.trashedAt,
+      sha256: sha256 ?? this.sha256,
     );
   }
 
@@ -170,6 +174,7 @@ class RemoteFile {
     'category': category,
     'isTrashed': isTrashed ? 1 : 0,
     'trashedAt': trashedAt?.millisecondsSinceEpoch,
+    'sha256': sha256,
   };
 
   factory RemoteFile.fromMap(Map<String, dynamic> map) => RemoteFile(
@@ -202,5 +207,6 @@ class RemoteFile {
     trashedAt: map['trashedAt'] != null
         ? DateTime.fromMillisecondsSinceEpoch(map['trashedAt'] as int)
         : null,
+    sha256: map['sha256'] as String?,
   );
 }

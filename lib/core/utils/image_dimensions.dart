@@ -106,11 +106,10 @@ bool isValidHqThumbnail(File file) {
     }
     final dims = getJpegDimensions(bytes);
     final isValid = dims != null && dims.width >= 120 && dims.height >= 120;
-    if (isValid) {
-      _hqThumbnailValidationCache[path] = true;
-    }
+    _hqThumbnailValidationCache[path] = isValid;
     return isValid;
   } catch (_) {
+    _hqThumbnailValidationCache[path] = false;
     return false;
   }
 }

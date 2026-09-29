@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
 import '../../../core/database/remote_file.dart';
+import '../../../core/services/native_media_service.dart';
 import '../models/collection_preview.dart';
 import '../repositories/media_repository.dart';
 import '../services/collection_thumbnail_resolver.dart';
+import 'upload_controller.dart';
 
 /// Distinct statuses of media sync and database cache loading.
 enum MediaLoadingStatus {
@@ -32,18 +35,69 @@ enum MediaLoadingStatus {
 /// - Proper loading, empty, error, and retry states
 class MediaController extends ChangeNotifier {
   static final MediaController _instance = MediaController._internal();
-  factory MediaController({MediaRepository? repository}) {
-    if (repository != null) {
-      return MediaController._internal(repository: repository);
+  factory MediaController({
+    MediaRepository? repository,
+    UploadController? uploadController,
+  }) {
+    if (repository != null || uploadController != null) {
+      return MediaController._internal(
+        repository: repository,
+        uploadController: uploadController,
+      );
     }
     return _instance;
   }
-  MediaController._internal({MediaRepository? repository})
-    : _repository = repository ?? MediaRepository();
+  MediaController._internal({
+    MediaRepository? repository,
+    UploadController? uploadController,
+  }) : _repository = repository ?? MediaRepository() {
+    _uploadController =
+        uploadController ??
+        UploadController(
+          repository: _repository.uploadRepository,
+          onUploadCompleted: _onUploadCompleted,
+        );
+    _uploadController.addListener(_onUploadQueueChanged);
+  }
 
   final MediaRepository _repository;
+  late final UploadController _uploadController;
 
   MediaRepository get repository => _repository;
+  UploadController get uploadController => _uploadController;
+
+  void _onUploadCompleted(RemoteFile remoteFile) async {
+    final idx = _recentMedia.indexWhere(
+      (f) => f.telegramMessageId == remoteFile.telegramMessageId,
+    );
+    if (idx == -1) {
+      _recentMedia.insert(0, remoteFile);
+    } else {
+      _recentMedia[idx] = remoteFile;
+    }
+    try {
+      _collectionCounts = await _repository.getCachedCollectionCounts();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  int _lastPendingCount = 0;
+  int _lastUploadingCount = 0;
+  bool _lastHasActive = false;
+
+  void _onUploadQueueChanged() {
+    final hasActive = _uploadController.hasActiveOrPending;
+    final pending = _uploadController.pendingCount;
+    final uploading = _uploadController.uploadingCount;
+    if (hasActive != _lastHasActive ||
+        pending != _lastPendingCount ||
+        uploading != _lastUploadingCount) {
+      _lastHasActive = hasActive;
+      _lastPendingCount = pending;
+      _lastUploadingCount = uploading;
+      notifyListeners();
+    }
+  }
 
   late final CollectionThumbnailResolver _thumbnailResolver =
       CollectionThumbnailResolver(repository: _repository);
@@ -57,6 +111,49 @@ class MediaController extends ChangeNotifier {
   String? _errorMessage;
   bool _isSyncing = false;
   DateTime? _lastSyncTime;
+
+  // ── Multi-Select Mode State ──
+  bool _isSelectionMode = false;
+  final Set<int> _selectedMessageIds = {};
+
+  bool get isSelectionMode => _isSelectionMode;
+  int get selectedCount => _selectedMessageIds.length;
+  Set<int> get selectedMessageIds => Set.unmodifiable(_selectedMessageIds);
+  bool isFileSelected(int messageId) => _selectedMessageIds.contains(messageId);
+
+  List<RemoteFile> get selectedFiles => _recentMedia
+      .where((f) => _selectedMessageIds.contains(f.telegramMessageId))
+      .toList();
+
+  void enterSelectionMode([RemoteFile? initialFile]) {
+    _isSelectionMode = true;
+    _selectedMessageIds.clear();
+    if (initialFile != null) {
+      _selectedMessageIds.add(initialFile.telegramMessageId);
+    }
+    notifyListeners();
+  }
+
+  void toggleSelection(RemoteFile file) {
+    if (_selectedMessageIds.contains(file.telegramMessageId)) {
+      _selectedMessageIds.remove(file.telegramMessageId);
+    } else {
+      _selectedMessageIds.add(file.telegramMessageId);
+    }
+    notifyListeners();
+  }
+
+  void selectAll([List<RemoteFile>? files]) {
+    final targets = files ?? _recentMedia;
+    _selectedMessageIds.addAll(targets.map((f) => f.telegramMessageId));
+    notifyListeners();
+  }
+
+  void exitSelectionMode() {
+    _isSelectionMode = false;
+    _selectedMessageIds.clear();
+    notifyListeners();
+  }
 
   MediaLoadingStatus get status => _status;
   List<RemoteFile> get recentMedia => _recentMedia;
@@ -112,10 +209,13 @@ class MediaController extends ChangeNotifier {
       }
     }
 
-    // 1. Read SQLite DB cache immediately (zero latency)
+    // 1. Initialize persistent upload queue and recover interrupted items
+    unawaited(_uploadController.initialize());
+
+    // 2. Read SQLite DB cache immediately (zero latency)
     await loadCacheOnly();
 
-    // 2. Trigger asynchronous background Telegram sync
+    // 3. Trigger asynchronous background Telegram sync
     await syncMedia();
   }
 
@@ -348,5 +448,163 @@ class MediaController extends ChangeNotifier {
       } catch (_) {}
     }
     return cleaned;
+  }
+
+  // ── Multi-Select Bulk Actions ──
+
+  /// Bulk moves selected files to trash.
+  /// Automatically exits selection mode upon completion.
+  Future<int> deleteSelected() async {
+    final targets = selectedFiles;
+    if (targets.isEmpty) {
+      exitSelectionMode();
+      return 0;
+    }
+
+    int count = 0;
+    for (final file in targets) {
+      await moveToTrash(file);
+      count++;
+    }
+    exitSelectionMode();
+    return count;
+  }
+
+  /// Bulk saves selected files to device user-visible gallery/downloads.
+  /// Does not download full media unnecessarily.
+  /// Automatically exits selection mode upon completion.
+  Future<List<String>> saveSelected() async {
+    final targets = selectedFiles;
+    if (targets.isEmpty) {
+      exitSelectionMode();
+      return [];
+    }
+
+    final List<String> savedPaths = [];
+    for (final file in targets) {
+      RemoteFile readyFile = file;
+      if (readyFile.localPath == null ||
+          !File(readyFile.localPath!).existsSync() ||
+          File(readyFile.localPath!).lengthSync() == 0) {
+        // Download on-demand only because user explicitly requested saving
+        readyFile = await downloadFile(file);
+      }
+
+      if (readyFile.localPath != null &&
+          File(readyFile.localPath!).existsSync()) {
+        try {
+          final path = await NativeMediaService.saveToDevice(
+            filePath: readyFile.localPath!,
+            fileName: readyFile.name,
+            mimeType: readyFile.mimeType,
+            category: readyFile.category,
+          );
+          savedPaths.add(path);
+        } catch (e) {
+          debugPrint('[MEDIA] Error saving ${readyFile.name}: $e');
+        }
+      }
+    }
+
+    exitSelectionMode();
+    return savedPaths;
+  }
+
+  /// Bulk shares selected files using native share sheet.
+  /// Downloads and caches all required files first.
+  /// Awaits all downloads before calling the native share API exactly ONCE.
+  /// If [isCancelled] returns true, halts remaining downloads and exits without sharing.
+  /// Automatically exits selection mode upon completion.
+  Future<bool> shareSelected({
+    void Function(int current, int total, String fileName)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final targets = List<RemoteFile>.from(selectedFiles);
+    if (targets.isEmpty) {
+      exitSelectionMode();
+      return false;
+    }
+
+    final List<String> readyPaths = [];
+    final List<String> readyMimes = [];
+    bool allSuccess = true;
+
+    for (int i = 0; i < targets.length; i++) {
+      if (isCancelled?.call() == true) {
+        return false;
+      }
+      final file = targets[i];
+      onProgress?.call(i + 1, targets.length, file.name);
+
+      RemoteFile readyFile = file;
+      if (readyFile.localPath == null ||
+          !File(readyFile.localPath!).existsSync() ||
+          File(readyFile.localPath!).lengthSync() == 0) {
+        try {
+          readyFile = await downloadFile(file);
+        } catch (e) {
+          debugPrint(
+            '[MEDIA] Error downloading ${file.name} for bulk share: $e',
+          );
+          allSuccess = false;
+          continue;
+        }
+      }
+
+      if (readyFile.localPath != null &&
+          File(readyFile.localPath!).existsSync() &&
+          File(readyFile.localPath!).lengthSync() > 0) {
+        readyPaths.add(readyFile.localPath!);
+        readyMimes.add(
+          NativeMediaService.resolveMimeType(
+            fileName: readyFile.name,
+            currentMime: readyFile.mimeType,
+            isPhoto: readyFile.isPhoto,
+            isVideo: readyFile.isVideo,
+          ),
+        );
+      } else {
+        allSuccess = false;
+      }
+    }
+
+    if (isCancelled?.call() == true) {
+      return false;
+    }
+
+    if (readyPaths.isEmpty) {
+      exitSelectionMode();
+      return false;
+    }
+
+    try {
+      final allPhotos = targets.every((f) => f.isPhoto);
+      final allVideos = targets.every((f) => f.isVideo);
+      final categoryText = allPhotos
+          ? 'photos'
+          : (allVideos ? 'videos' : 'items');
+      final title = readyPaths.length == 1
+          ? targets.first.name
+          : 'Share ${readyPaths.length} $categoryText';
+
+      final shared = await NativeMediaService.shareFiles(
+        filePaths: readyPaths,
+        mimeTypes: readyMimes,
+        title: title,
+      );
+      if (!shared) allSuccess = false;
+    } catch (e) {
+      debugPrint('[MEDIA] Error bulk sharing files: $e');
+      allSuccess = false;
+    }
+
+    exitSelectionMode();
+    return allSuccess;
+  }
+
+  @override
+  void dispose() {
+    _uploadController.removeListener(_onUploadQueueChanged);
+    super.dispose();
   }
 }

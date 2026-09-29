@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
 import 'remote_file.dart';
+import 'upload_queue_item.dart';
 
 /// Central SQLite local database for Nuvex.
 ///
@@ -96,7 +97,8 @@ class NuvexDatabase {
         height INTEGER,
         category TEXT NOT NULL,
         isTrashed INTEGER NOT NULL DEFAULT 0,
-        trashedAt INTEGER
+        trashedAt INTEGER,
+        sha256 TEXT
       )
     ''');
 
@@ -115,36 +117,94 @@ class NuvexDatabase {
       ON remote_files(name COLLATE NOCASE)
     ''');
 
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS upload_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filePath TEXT NOT NULL,
+        fileName TEXT NOT NULL,
+        fileSize INTEGER NOT NULL,
+        mimeType TEXT NOT NULL,
+        status TEXT NOT NULL,
+        progress REAL NOT NULL DEFAULT 0.0,
+        sha256 TEXT,
+        errorMessage TEXT,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        telegramMessageId INTEGER
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_upload_queue_status 
+      ON upload_queue(status)
+    ''');
+
     // Clean up legacy recent_searches table if present
     await db.execute('DROP TABLE IF EXISTS recent_searches');
 
     await _ensureMigrationColumns(db);
   }
 
-  /// Ensures required migration columns (isTrashed, trashedAt) exist on remote_files.
+  /// Ensures required migration columns and tables exist.
   Future<void> _ensureMigrationColumns(Database db) async {
     try {
       final tables = await db.rawQuery(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='remote_files'",
       );
-      if (tables.isEmpty) return;
+      if (tables.isNotEmpty) {
+        final info = await db.rawQuery('PRAGMA table_info(remote_files)');
+        final columnNames = info.map((r) => r['name'] as String).toSet();
 
-      final info = await db.rawQuery('PRAGMA table_info(remote_files)');
-      final columnNames = info.map((r) => r['name'] as String).toSet();
+        if (!columnNames.contains('isTrashed')) {
+          await db.execute(
+            'ALTER TABLE remote_files ADD COLUMN isTrashed INTEGER NOT NULL DEFAULT 0',
+          );
+        }
+        if (!columnNames.contains('trashedAt')) {
+          await db.execute(
+            'ALTER TABLE remote_files ADD COLUMN trashedAt INTEGER',
+          );
+        }
+        if (!columnNames.contains('sha256')) {
+          await db.execute('ALTER TABLE remote_files ADD COLUMN sha256 TEXT');
+        }
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_remote_files_trashed 
+          ON remote_files(isTrashed, trashedAt)
+        ''');
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_remote_files_sha256 
+          ON remote_files(sha256)
+        ''');
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_remote_files_gallery 
+          ON remote_files(isTrashed, category, createdAt DESC)
+        ''');
+        await db.execute('''
+          CREATE INDEX IF NOT EXISTS idx_remote_files_trashed_created 
+          ON remote_files(isTrashed, createdAt DESC)
+        ''');
+      }
 
-      if (!columnNames.contains('isTrashed')) {
-        await db.execute(
-          'ALTER TABLE remote_files ADD COLUMN isTrashed INTEGER NOT NULL DEFAULT 0',
-        );
-      }
-      if (!columnNames.contains('trashedAt')) {
-        await db.execute(
-          'ALTER TABLE remote_files ADD COLUMN trashedAt INTEGER',
-        );
-      }
       await db.execute('''
-        CREATE INDEX IF NOT EXISTS idx_remote_files_trashed 
-        ON remote_files(isTrashed, trashedAt)
+        CREATE TABLE IF NOT EXISTS upload_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          filePath TEXT NOT NULL,
+          fileName TEXT NOT NULL,
+          fileSize INTEGER NOT NULL,
+          mimeType TEXT NOT NULL,
+          status TEXT NOT NULL,
+          progress REAL NOT NULL DEFAULT 0.0,
+          sha256 TEXT,
+          errorMessage TEXT,
+          createdAt INTEGER NOT NULL,
+          updatedAt INTEGER NOT NULL,
+          telegramMessageId INTEGER
+        )
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_upload_queue_status 
+        ON upload_queue(status)
       ''');
     } catch (e) {
       debugPrint('[DB] Migration error checking columns: $e');
@@ -164,8 +224,8 @@ class NuvexDatabase {
           id, telegramChatId, telegramMessageId, telegramFileId, name, mimeType,
           sizeBytes, createdAt, modifiedAt, thumbnailPath, localPath, remoteAvailable,
           isFavorite, isArchived, isLocked, latitude, longitude, durationMs, width, height, category,
-          isTrashed, trashedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          isTrashed, trashedAt, sha256
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(telegramMessageId) DO UPDATE SET
           name = excluded.name,
           mimeType = excluded.mimeType,
@@ -197,7 +257,8 @@ class NuvexDatabase {
           height = COALESCE(excluded.height, remote_files.height),
           category = excluded.category,
           isTrashed = remote_files.isTrashed,
-          trashedAt = remote_files.trashedAt
+          trashedAt = remote_files.trashedAt,
+          sha256 = COALESCE(excluded.sha256, remote_files.sha256)
         ''',
         [
           file.id,
@@ -223,6 +284,7 @@ class NuvexDatabase {
           file.category,
           file.isTrashed ? 1 : 0,
           file.trashedAt?.millisecondsSinceEpoch,
+          file.sha256,
         ],
       );
     }
@@ -721,6 +783,96 @@ class NuvexDatabase {
       totalCount: totalCount,
       totalBytes: totalBytes,
     );
+  }
+
+  // ── Duplicate Detection Methods ──
+
+  /// Finds an existing non-trashed file by its SHA-256 hash.
+  Future<RemoteFile?> findFileBySha256(String hash) async {
+    final database = db;
+    final rows = await database.query(
+      'remote_files',
+      where: 'sha256 = ? AND isTrashed = 0',
+      whereArgs: [hash],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return RemoteFile.fromMap(rows.first);
+  }
+
+  /// Checks whether an identical file hash exists in either remote_files or completed upload_queue.
+  Future<bool> hasFileWithSha256(String hash) async {
+    final database = db;
+    final existingFile = await findFileBySha256(hash);
+    if (existingFile != null) return true;
+
+    final queueRows = await database.query(
+      'upload_queue',
+      where: "sha256 = ? AND status = 'completed'",
+      whereArgs: [hash],
+      limit: 1,
+    );
+    return queueRows.isNotEmpty;
+  }
+
+  // ── Upload Queue Persistence Methods ──
+
+  /// Inserts a new upload queue item, returning the generated row id.
+  Future<int> insertUploadQueueItem(UploadQueueItem item) async {
+    final database = db;
+    return database.insert('upload_queue', item.toMap());
+  }
+
+  /// Updates an existing upload queue item by ID.
+  Future<void> updateUploadQueueItem(UploadQueueItem item) async {
+    if (item.id == null) return;
+    final database = db;
+    await database.update(
+      'upload_queue',
+      item.toMap(),
+      where: 'id = ?',
+      whereArgs: [item.id],
+    );
+  }
+
+  /// Retrieves all upload queue items ordered chronologically.
+  Future<List<UploadQueueItem>> getUploadQueue() async {
+    if (!isInitialized) return [];
+    final database = db;
+    final rows = await database.query('upload_queue', orderBy: 'createdAt ASC');
+    return rows.map((r) => UploadQueueItem.fromMap(r)).toList();
+  }
+
+  /// Retrieves a single upload queue item by ID.
+  Future<UploadQueueItem?> getUploadQueueItem(int id) async {
+    if (!isInitialized) return null;
+    final database = db;
+    final rows = await database.query(
+      'upload_queue',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return UploadQueueItem.fromMap(rows.first);
+  }
+
+  /// Deletes a queue item by ID.
+  Future<void> deleteUploadQueueItem(int id) async {
+    if (!isInitialized) return;
+    final database = db;
+    await database.delete('upload_queue', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Resets any items left in 'uploading' status back to 'pending' upon app restart.
+  /// Strictly satisfies requirement: "Queue must survive app restart."
+  Future<void> resetUploadingToPending() async {
+    if (!isInitialized) return;
+    final database = db;
+    await database.update('upload_queue', {
+      'status': 'pending',
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    }, where: "status = 'uploading'");
   }
 
   /// Closes database connection.

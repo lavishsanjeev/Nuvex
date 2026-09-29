@@ -6,11 +6,13 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../../core/database/nuvex_database.dart';
 import '../../../core/database/remote_file.dart';
+import '../../../core/utils/file_hash.dart';
 import '../../../core/utils/image_dimensions.dart';
 import '../../../telegram/telegram_media_service.dart';
 import '../../../telegram/telegram_models.dart';
 import '../models/collection_preview.dart';
 import '../services/collection_thumbnail_resolver.dart';
+import 'upload_repository.dart';
 
 /// Repository coordinating local SQLite database cache and Telegram MTProto media sync.
 ///
@@ -86,6 +88,13 @@ class MediaRepository {
       CollectionThumbnailResolver(repository: this);
 
   CollectionThumbnailResolver get thumbnailResolver => _thumbnailResolver;
+
+  late final UploadRepository _uploadRepository = UploadRepository(
+    database: _database,
+    mediaService: _mediaService,
+  );
+
+  UploadRepository get uploadRepository => _uploadRepository;
 
   /// Retrieves a prepared [CollectionPreview] for a specific category.
   Future<CollectionPreview> getCollectionPreview(
@@ -195,6 +204,9 @@ class MediaRepository {
       if (pageMedia.isNotEmpty) {
         await _database.upsertFiles(pageMedia);
       }
+
+      // Yield cooperatively to UI isolate to maintain 60/120fps responsiveness
+      await Future<void>.delayed(Duration.zero);
 
       final oldestMsgId =
           _mediaService.lastOldestMessageId ??
@@ -313,7 +325,9 @@ class MediaRepository {
 
     if (isValidHqThumbnail(targetFile)) {
       final updated = file.copyWith(thumbnailPath: targetPath);
-      await _database.upsertFiles([updated]);
+      if (file.thumbnailPath != targetPath) {
+        await _database.upsertFiles([updated]);
+      }
       return updated;
     }
 
@@ -327,7 +341,9 @@ class MediaRepository {
       // Re-check if written while waiting
       if (isValidHqThumbnail(targetFile)) {
         final updated = file.copyWith(thumbnailPath: targetPath);
-        await _database.upsertFiles([updated]);
+        if (file.thumbnailPath != targetPath) {
+          await _database.upsertFiles([updated]);
+        }
         return updated;
       }
 
@@ -338,7 +354,9 @@ class MediaRepository {
       );
 
       final updated = file.copyWith(thumbnailPath: targetPath);
-      await _database.upsertFiles([updated]);
+      if (file.thumbnailPath != targetPath) {
+        await _database.upsertFiles([updated]);
+      }
       return updated;
     } finally {
       completer.complete();
@@ -552,11 +570,19 @@ class MediaRepository {
   Future<TelegramUploadResult> uploadFile({
     required File file,
     String? mimeType,
+    String? sha256,
     void Function(double progress)? onProgress,
     TelegramUploadCancelToken? cancelToken,
     int? randomId,
     bool saveToDatabase = true,
   }) async {
+    String? fileSha256 = sha256;
+    if (fileSha256 == null && file.existsSync()) {
+      try {
+        fileSha256 = await calculateFileSha256(file);
+      } catch (_) {}
+    }
+
     final result = await _mediaService.uploadDocumentFile(
       file: file,
       mimeType: mimeType,
@@ -569,10 +595,13 @@ class MediaRepository {
       if (!_database.isInitialized) {
         await _database.initialize();
       }
-      final remoteFile = result.toRemoteFile(localPath: file.path);
+      final remoteFile = result.toRemoteFile(
+        localPath: file.path,
+        sha256: fileSha256,
+      );
       await _database.upsertFiles([remoteFile]);
       debugPrint(
-        '[REPO] Persisted uploaded file #${result.messageId} to SQLite database',
+        '[REPO] Persisted uploaded file #${result.messageId} to SQLite database (hash: $fileSha256)',
       );
     }
 
